@@ -1,19 +1,12 @@
-from time import sleep_ms, ticks_ms, ticks_diff
-import _thread  # threading?
-import json
+# import _thread  # threading?
+# import json
 import ILI9341
-from random import getrandbits, randint
-import time
 import uasyncio
+import time
 import umsgpack
 from machine import UART
 from machine import Pin
 from machine import Timer
-
-# append so we can also access root directory modules
-import sys
-import gc
-sys.path.append("..")
 
 class MESSAGE_TYPE():
     REQUEST_UPDATE = 0
@@ -96,8 +89,6 @@ CONVERTING_NEUTRAL_TO_RED = 6  # 15-18
 def log(*args):
     # log handling
     # at the moment just prints to the console TODO: add to log file
-    # get current time
-
     message = ""
     for arg in args:
         message += str(arg) + " "
@@ -177,11 +168,6 @@ def button_respawn_down(a):
 
         tickets[flag_status[ID]-1] -= RESPAWN_TICKET_COST  # tickets abziehen
         respawn_timer.append(RESPAWN_TIME)
-
-    #TODO: Senden
-    #lora_send(flag_status, tickets,0,[other_IDs[0],other_IDs[1]])
-    #log("timer started")
-    #tim_send.init(period=3000, mode=Timer.PERIODIC, callback=lora_send_repeat)
 
 
 ####### Lora #######

@@ -6,14 +6,9 @@ import umsgpack
 from machine import UART
 from machine import Pin
 from machine import Timer
-
-# append so we can also access root directory modules
-import sys
 import gc
-sys.path.append("..")
 
-
-#import lora_comm as comm  #selfmade
+## enums
 
 class MESSAGE_TYPE():
     REQUEST_UPDATE = 0
@@ -23,117 +18,16 @@ class MESSAGE_TYPE():
     SYNC = 4
     READY = 5
 
-class Client():
-    
-    def get_status(self):
-        return self.status
-
-    def __init__(self, id, lora, d_tickets_local, flag_status_local, sLock):
-        self.id = id
-        self.lora = lora
-        self.sLock = sLock
-        self.status = [[0,0], [0,0,0]]
-        self.d_tickets_local = d_tickets_local
-        self.flag_status_local = flag_status_local
-        try:
-            uasyncio.run(self.initialize_connection())
-        except KeyboardInterrupt:
-            self.log('Interrupted')
-        finally:
-            uasyncio.new_event_loop()
-
-    def send_ready_signal(self):
-        swriter = uasyncio.StreamWriter(self.lora, {})
-        msg = [self.id, MESSAGE_TYPE.READY]
-        self.log("Sending ready signal:", msg)
-        s = umsgpack.dumps(msg)
-        #self.log(msg, "->")
-        swriter.write(self.package(s))
-        swriter.drain()
-        swriter.close()
-    
-    def log(self, *args):
-        # log handling
-        # at the moment just prints to the console TODO: add to log file
-        message = ""
-        for arg in args:
-            message += str(arg) + " "
-            
-        # get current time
-        t = time.localtime()
-        ts = str(t[4]) + ":" + str(t[5])
-        print("COM" + str(self.id+3) + " (client) @ " + ts + " > " + str(message))
-
-    async def initialize_connection(self):
-        self.log("Hi, this is COM" + str(self.id+3))
-        uasyncio.create_task(self.wait_for_status())
-        while True:
-            gc.collect()
-            self.log('mem free', gc.mem_free())
-            await uasyncio.sleep(20)
-
-    def package(self, s):
-        return len(s).to_bytes(1, 'big') + s
-
-    """_summary_: Sends an update to given ID
-    """
-    async def send_update(self, send_to, update):
-        swriter = uasyncio.StreamWriter(self.lora, {})
-        msg = [self.id, MESSAGE_TYPE.UPDATE, send_to, update]
-        self.log("Sending update:", msg)
-        s = umsgpack.dumps(msg)
-        #self.log(msg, "->")
-        swriter.write(self.package(s))
-        await swriter.drain()
-        self.log("")
-        swriter.close()
-
-    """_summary_: Receives status
-       _returns_: status of server([display_tickets, flag_status])
-    """
-    async def wait_for_status(self) -> list:
-        sreader = uasyncio.StreamReader(self.lora)
-
-        while True:
-            self.log("Listening for status(aka. update request)...")
-            sLock.acquire()
-            # first read how many bytes should be read
-            lead = await sreader.read(1)
-            self.log("Received leading byte:", lead)
-            if lead == b"\x00":  # EOF
-                self.log("EOF")
-                continue  # try again
-
-            b = await sreader.read(int.from_bytes(lead, 'big'))
-            try:
-                res = umsgpack.loads(b)
-            except:
-                self.log("WARNING: Recieved not loadable:", b)
-
-            if type(res) == list:
-                self.log("Received from COM" + str(res[0]+3) + ":", res)
-                if res[1] == MESSAGE_TYPE.STATUS:
-                    self.log("It's a status.")
-                    self.status = res[2]
-                    
-                    sreader.close()
-                    if self.id > 1:
-                        self.log("Waiting for", 0.3*(self.id-1), "s")
-                        await uasyncio.sleep(0.3*(self.id-1))
-                    update = [self.d_tickets_local, self.flag_status_local]
-                    await self.send_update(res[0], update)
-                    
-            else:  # not a useful object
-                self.log('Recieved', res)
-                self.log('Discarding...')
-            sLock.release()
-
-
-
+class GAME_STATUS():
+    PAIRING = 0
+    RUNNING = 1
+    ENDED = 2
+    ERROR = 3
 
 ##################################
 
 # SPIELEINSTELLUNG ####
+# TODO: Sync
 RESPAWN_TIME = 30
 CONVERSION_TIME = 10000
 RESPAWN_TICKET_COST = 5
@@ -183,8 +77,9 @@ GAME_RUNNING = 2
 ID = 1  # THIS FLAG
 
 #Variablen
-last_pressed = time.ticks_ms()
-flag_status = [0, 0, 0]
+last_pressed = time.ticks_ms() # debounce
+
+flag_status_local = [0, 0, 0]
 respawn_timer = [] # list will be appended
 
 d_tickets_local = [0,0]
@@ -193,9 +88,8 @@ displayed_tickets = [INITIAL_TICKET_AMOUNT, INITIAL_TICKET_AMOUNT]
 game = GAME_PAIRING
 countdown_timer = COUNTDOWN_GAME_START
 
+# threading, async listening to lora
 sLock = _thread.allocate_lock()
-
-
 
 
 #Timer
@@ -217,24 +111,22 @@ CONVERTING_NEUTRAL_TO_RED = 6  # 15-18
 
 # HILFSFUNKTIONEN
 
-# get current time
-
-
-def get_time():
-    t = time.localtime()
-    return str(t[4]) + ":" + str(t[5])
-
-
-def log(message):
+def log(*args):
     # log handling
     # at the moment just prints to the console TODO: add to log file
-    print("COM" + str(ID+3)+" (main) @ " + get_time() + " > " + str(message))
+    # get current time
+
+    message = ""
+    for arg in args:
+        message += str(arg) + " "
+
+    t = time.localtime()
+    ts = str(t[4]) + ":" + str(t[5])
+    print("COM" + str(ID+3) + " @ " + ts + " > " + str(message))
 
 ##### BUTTONS #####
 
 # debounce, sodass immer nur ein button press registriert wird
-
-
 def debounce():
     global last_pressed
 
@@ -245,7 +137,6 @@ def debounce():
 
     last_pressed = now
 
-
 def button_flag_down_red(a):
     if debounce() == False:
         return
@@ -253,14 +144,14 @@ def button_flag_down_red(a):
     if button_flag_red.value == 1:
         pass
     log("rot nimmt ein")
-    if flag_status[ID] in [0, 15, 16, 17, 18]:  # gray
-        flag_status[ID] = 7
-    elif flag_status[ID] in [2]:  # gray
-        flag_status[ID] = 3
-    elif flag_status[ID] in [11, 12, 13, 14]:
-        flag_status[ID] = 1
+    if flag_status_local[ID] in [0, 15, 16, 17, 18]:  # gray
+        flag_status_local[ID] = 7
+    elif flag_status_local[ID] in [2]:  # gray
+        flag_status_local[ID] = 3
+    elif flag_status_local[ID] in [11, 12, 13, 14]:
+        flag_status_local[ID] = 1
 
-    update_lcd_flag_status(flag_status)
+    update_lcd_flag_status(flag_status_local)
 
 def button_flag_down_blue(a):
     if debounce() == False:
@@ -269,53 +160,125 @@ def button_flag_down_blue(a):
     if button_flag_blue.value == 1:
         pass
     log("Blau nimmt ein")
-    if flag_status[ID] in [0, 7, 8, 9, 10]:  # gray
-        flag_status[ID] = 15
-    elif flag_status[ID] in [1]:
-        flag_status[ID] = 11
-    elif flag_status[ID] in [3, 4, 5, 6]:
-        flag_status[ID] = 2
+    if flag_status_local[ID] in [0, 7, 8, 9, 10]:  # gray
+        flag_status_local[ID] = 15
+    elif flag_status_local[ID] in [1]:
+        flag_status_local[ID] = 11
+    elif flag_status_local[ID] in [3, 4, 5, 6]:
+        flag_status_local[ID] = 2
 
-    update_lcd_flag_status(flag_status)
-
+    update_lcd_flag_status(flag_status_local)
 
 def button_respawn_down(a):
     if debounce() == False:
         return
     log('Respawn Button down')
     if game == GAME_PAIRING: # if Game is in paring mode, send server a start_game message
-        if client:
-            client.send_ready_signal()
-        else:
-            log("Client not connected.")
-    if flag_status[ID] in [1, 2]:  # RED or BLUE
+        send_ready_signal()
+    if flag_status_local[ID] in [1, 2]:  # RED or BLUE
         log("Respawning...")
-        d_tickets_local[flag_status[ID]-1] += RESPAWN_TICKET_COST  # tickets abziehen
+        d_tickets_local[flag_status_local[ID]-1] += RESPAWN_TICKET_COST  # tickets abziehen
         respawn_timer.append(RESPAWN_TIME)
-    update_lora()
-
 
 ####### Lora #######
-client = None
 
+def setup_lora_thread():
+    _thread.start_new_thread(start_async_lora, ())
 
-def setup_lora():
-    global client
+def start_async_lora():
+    """Starts the async Lora listening part. Should be executed in a thread."""
+
+    try:
+        uasyncio.run(initialize_connection())
+    except KeyboardInterrupt:
+        log('Interrupted')
+    finally:
+        uasyncio.new_event_loop()
+
+def send_ready_signal():
+    swriter = uasyncio.StreamWriter(lora, {})
+    msg = [id, MESSAGE_TYPE.READY]
+    log("Sending ready signal:", msg)
+    s = umsgpack.dumps(msg)
+    swriter.write(package(s))
+    swriter.drain()
+    swriter.close()
+
+async def initialize_connection():
+    log("Hi, this is COM" + str(id+3))
+    uasyncio.create_task(wait_for_status())
+    while True: # print out used memory sometimes and garbage collect
+        gc.collect()
+        log('mem free', gc.mem_free())
+        await uasyncio.sleep(20)
+
+def package(s: bytes) -> bytes:
+    """Adds a leading byte to indicate the length of the message
+
+    Args:
+        s (bytes): The message to be packaged
+
+    Returns:
+        bytes: The packaged message
+    """    
     
-    client = _thread.start_new_thread(Client, [ID, lora, d_tickets_local, flag_status[ID], sLock])
+    return len(s).to_bytes(1, 'big') + s
 
-def update_lora():
-    global displayed_tickets, flag_status, client
-    if client:
-        client.d_tickets_local = d_tickets_local
-        client.flag_status_local = flag_status[ID]
+async def send_update(send_to, update):
+    """Sends an update to a specific COM."""
+    
+    swriter = uasyncio.StreamWriter(lora, {})
+    msg = [id, MESSAGE_TYPE.UPDATE, send_to, update]
+    log("Sending update:", msg)
+    s = umsgpack.dumps(msg)
+    swriter.write(package(s))
+    await swriter.drain()
+    swriter.close()
+
+async def wait_for_status():
+    global server_tickets, server_flag_status
+    
+    sreader = uasyncio.StreamReader(lora)
+
+    while True:
+        log("Listening for status(aka. update request)...")
         
-        displayed_tickets = client.getstatus()[0]
-        flag_status = client.getstatus()[1]
+        sLock.acquire()
+        # first read how many bytes should be read
+        lead = await sreader.read(1)
+        log("Received leading byte:", lead)
+        if lead == b"\x00":  # EOF
+            log("EOF")
+            continue  # try again
+
+        b = await sreader.read(int.from_bytes(lead, 'big'))
+        try:
+            res = umsgpack.loads(b)
+        except:
+            log("WARNING: Recieved not loadable:", b)
+
+        if type(res) == list:
+            log("Received from COM" + str(res[0]+3) + ":", res)
+            if res[1] == MESSAGE_TYPE.STATUS:
+                log("Received message is a status.")
+                server_tickets  = res[2][0] 
+                server_flag_status = res[2][1]
+                log("Server tickets:", server_tickets)
+                log("Server flag status:", server_flag_status)
+
+                sreader.close() # close the stream reader
+                if id > 1:
+                    log("Waiting for", 0.3*(id-1), "s")
+                    await uasyncio.sleep(0.3*(id-1))
+                update = [d_tickets_local, flag_status_local]
+                await send_update(res[0], update)
+        else:  # not a useful object
+            log('Discarding...')
+            log('Recieved', res)
+        sLock.release()
 
 
 ######### LCD ########
-
 
 BLACK = 0x0000
 BLUE = 0x001F
@@ -327,18 +290,8 @@ YELLOW = 0xFFE0
 WHITE = 0xFFFF
 GRAY = 0x8410
 
-
-def update_lcd(signal):
-
-    tft.fillRect(0, 0, 320, 75, BLACK)
-    tft.setTextColor(GREEN)
-    tft.SetFont(3)
-    tft.setTextCursor(0, 20)
-    tft.printh(str(signal))
-
-
 def lcd_status_ini():
-    global flag_status
+    global flag_status_local
 
     tft.SetFont(3)
     tft.setTextColor(GREEN)
@@ -357,8 +310,7 @@ def lcd_status_ini():
     tft.setTextCursor(145, 210)
     tft.printh("Charlie")
 
-    update_lcd_flag_status(flag_status)
-
+    update_lcd_flag_status(flag_status_local)
 
 def update_lcd_tickets(tickets):
 
@@ -370,7 +322,6 @@ def update_lcd_tickets(tickets):
     tft.setTextColor(BLUE)
     tft.setTextCursor(170, 20)
     tft.printh(str(int(tickets[1])))
-
 
 def update_win_screen(flag_status, tickets):
 
@@ -400,7 +351,6 @@ def update_win_screen(flag_status, tickets):
         restart_game()
         log("Restarting game...")
 
-
 def update_lcd_respawn_timers(respawn_timers):
 
     tft.fillRect(0, 60, 100, 400, BLACK)
@@ -409,7 +359,6 @@ def update_lcd_respawn_timers(respawn_timers):
         tft.setTextColor(WHITE)
         tft.setTextCursor(5, 80+i*30)
         tft.printh(str(i) + ": " + str(time))
-
 
 def update_lcd_flag_status(flag_status):
 
@@ -430,45 +379,36 @@ def update_lcd_flag_status(flag_status):
 
 ### Update timers ###
 
-# jede Sekunde, hauptsächlich für respawn_timer
-
-
+# every second: update the respawn timers, and check win conditions
 def update(x):
     global displayed_tickets
-    update_lora()
-    
-    #log(tickets)
-    #log(respawn_timer)
+
     update_lcd_tickets(displayed_tickets)
 
     for i in range(len(respawn_timer)):
         if i >= len(respawn_timer):
             break
-        respawn_timer[i] -= 1
+        respawn_timer[i] -= 1 # countdown tickets by 1 each second
         if respawn_timer[i] == 0:
             del respawn_timer[i]
             i += 1
     update_lcd_respawn_timers(respawn_timer)
-    update_win_screen(flag_status, displayed_tickets)
+    update_win_screen(flag_status_local, displayed_tickets)
 
-#
-
-
+# for flag status animation
 def flag_status_update(x):
     global counter
-    for i in range(len(flag_status)):
-        if flag_status[i] > 2:
-            flag_status[i] += 1
-            if (flag_status[i]-3) % 4 == 0:
-                if flag_status[i] <= 11:
-                    flag_status[i] = 1  # ROT
+    for i in range(len(flag_status_local)):
+        if flag_status_local[i] > 2:
+            flag_status_local[i] += 1
+            if (flag_status_local[i]-3) % 4 == 0:
+                if flag_status_local[i] <= 11:
+                    flag_status_local[i] = 1  # ROT
                 else:
-                    flag_status[i] = 2  # BLAU
-    update_lcd_flag_status(flag_status)
+                    flag_status_local[i] = 2  # BLAU
+    update_lcd_flag_status(flag_status_local)
 
 # Jede sekunde vor dem Spielstart
-
-
 def countdown(x):
     global countdown_time
 
@@ -479,10 +419,8 @@ def countdown(x):
         start_game()
 
 #### Init Funktionen ####
-
-
 def start_game():
-    #global game
+    # global game
     # screen
     tft.fillscreen(BLACK)
     lcd_status_ini()
@@ -496,8 +434,8 @@ def start_game():
     # timer for game updates
     tim.init(period=1000, mode=Timer.PERIODIC, callback=update)
 
-    #setup lora
-    setup_lora()
+    #setup thread for lora
+    setup_lora_thread()
 
     # buttons
     button_respawn.irq(handler=button_respawn_down, trigger=Pin.IRQ_RISING)
@@ -507,31 +445,40 @@ def start_game():
 
 
 def restart_game():
-    global flag_status
-    global game
+    global flag_status_local, d_tickets_local, respawn_timer, countdown_timer, displayed_tickets, game
+    
+    flag_status_local = [0, 0, 0]
+    d_tickets_local = [0, 0]	
+    respawn_timer = []
+    countdown_timer = COUNTDOWN_GAME_START
+    displayed_tickets = [0, 0]
 
-    flag_status = [0, 0, 0]
-
+    # deinit timers
     tim_flags.deinit()
     tim_logic.deinit()
     tim.deinit()
-    game = False
 
+    # screen stays on
 
-### Actual Code ###
+def lcd_init():
+    global tft
+    # init for lcd screen
+    log("Initializing LCD...")
+    tft = ILI9341.screen(LCD_RD, LCD_WR, LCD_RS, LCD_CS, LCD_RST,
+                        LCD_D0, LCD_D1, LCD_D2, LCD_D3, LCD_D4, LCD_D5, LCD_D6, LCD_D7)
 
-# init for lcd screen
-log("Initializing LCD...")
-tft = ILI9341.screen(LCD_RD, LCD_WR, LCD_RS, LCD_CS, LCD_RST,
-                     LCD_D0, LCD_D1, LCD_D2, LCD_D3, LCD_D4, LCD_D5, LCD_D6, LCD_D7)
+    tft.begin()
+    tft.setrotation(1)
+    tft.fillscreen(BLACK)
 
-tft.begin()
-tft.setrotation(1)
-tft.fillscreen(BLACK)
+    log("LCD initialized.")
+    
+### Main ###
 
-log("LCD initialized.")
+if __name__ == "__main__":
+    lcd_init()
 
-log("Starting game...")
+    log("Starting game...")
+    start_game()
 
-start_game()
-#tim_flags.init(period=1000, mode=Timer.PERIODIC, callback=lora_initialize)
+    

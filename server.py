@@ -1,12 +1,10 @@
-# import _thread  # threading?
-# import json
+import time
+
 import ILI9341
 import uasyncio
-import time
+from machine import UART, Pin, Timer
+
 import umsgpack
-from machine import UART
-from machine import Pin
-from machine import Timer
 
 class MESSAGE_TYPE():
     REQUEST_UPDATE = 0
@@ -14,6 +12,10 @@ class MESSAGE_TYPE():
     STATUS = 2
     OK = 3
     SYNC = 4
+
+class GAME_STATE():
+    WAITING: int = 0,
+    RUNNING: int = 1
 
 #Pinbelegung
 button_respawn = Pin(21, Pin.IN, Pin.PULL_UP)
@@ -40,6 +42,7 @@ YM = LCD_D1
 YP = LCD_CS
 XM = LCD_RS
 
+# SERVER:
 # SPIELEINSTELLUNG
 RESPAWN_TIME = 30
 CONVERSION_TIME = 10000
@@ -51,30 +54,27 @@ COUNTDOWN_GAME_START = 10
 # Flaggennummer
 ID = 0 # THIS FLAG
 
-#Variablen
-last_on2 = 0
-other_IDs = [0, 1]
-pingback_stat = [0, 0, 0]
-lora_buffer = ""
-flag_status = [0, 0, 0]
-respawn_timer = []
-tickets = [INITIAL_TICKET_AMOUNT, INITIAL_TICKET_AMOUNT]
+#### Variablen
+debounce_last_on = 0
+
+
+local_respawn_timer = []
+
+server_flag_status = [0, 0, 0]
+displayed_tickets = [INITIAL_TICKET_AMOUNT, INITIAL_TICKET_AMOUNT]
+
+local_ticket_diff = [[0,0], [0,0], [0,0]] # differential amount of tickets, 
 
 # Spielstatus
-GAME_WAITING = 0  # Wartet, bis beide Teams die Buttons drücken
-GAME_RUNNING = 1
-game = 0
-countdown_time = 10
+game = GAME_STATE.WAITING
+countdown_time = COUNTDOWN_GAME_START
 
-#Timer
-tim = Timer()
-tim_1s_server = Timer()
-tim_flags = Timer()
-tim_send = Timer()
-tim_fast = Timer()
-tim_logic = Timer()
+# TIMER
+tim = Timer() # 1s game updates
+tim_1s_server = Timer() # broadcast status to all clients
+tim_flags = Timer() # timer for flag conversion animation
 
-# FLAG-STATUS mit Conversion process
+# FLAG-STATUS (including Conversion process)
 NEUTRAL = 0
 TEAM_RED = 1
 TEAM_BLUE = 2
@@ -84,10 +84,8 @@ CONVERTING_RED_TO_BLUE = 5  # 11-14
 CONVERTING_NEUTRAL_TO_RED = 6  # 15-18
 
 # HILFSFUNKTIONEN
-
-
 def log(*args):
-    # log handling
+    """Log to console"""
     # at the moment just prints to the console TODO: add to log file
     message = ""
     for arg in args:
@@ -99,21 +97,17 @@ def log(*args):
 
 ##### BUTTONS #####
 
-# debounce, sodass immer nur ein button press registriert wird
-
-
 def debounce():
-
-    global last_on2
+    """Debounce button, so it only triggers once"""
+    global debounce_last_on
 
     now = time.ticks_ms()
-    diff = time.ticks_diff(now, last_on2)
+    diff = time.ticks_diff(now, debounce_last_on)
     if (diff < 400):
 
         return False
 
-    last_on2 = now
-
+    debounce_last_on = now
 
 def button_flag_down_red(a):
     if debounce() == False:
@@ -121,21 +115,15 @@ def button_flag_down_red(a):
     time.sleep(0.1)
     if button_flag_red.value == 1:
         pass
-    log("rot nimmt ein")
-    if flag_status[ID] in [0, 15, 16, 17, 18]:  # gray
-        flag_status[ID] = 7
-    elif flag_status[ID] in [2]:  # gray
-        flag_status[ID] = 3
-    elif flag_status[ID] in [11, 12, 13, 14]:
-        flag_status[ID] = 1
+    log("BUTTON: Rot nimmt ein.")
+    if server_flag_status[ID] in [0, 15, 16, 17, 18]:  # gray
+        server_flag_status[ID] = 7
+    elif server_flag_status[ID] in [2]:  # gray
+        server_flag_status[ID] = 3
+    elif server_flag_status[ID] in [11, 12, 13, 14]:
+        server_flag_status[ID] = 1
 
-    update_lcd_flag_status(flag_status)
-
-    #TODO: Senden
-    #lora_send(flag_status, tickets,0,[other_IDs[0],other_IDs[1]])
-    #log("timer started")
-    #tim_send.init(period=3000, mode=Timer.PERIODIC, callback=lora_send_repeat)
-
+    update_lcd_flag_status(server_flag_status)
 
 def button_flag_down_blue(a):
     if debounce() == False:
@@ -143,44 +131,34 @@ def button_flag_down_blue(a):
     time.sleep(0.1)
     if button_flag_blue.value == 1:
         pass
-    log("Blau nimmt ein")
-    if flag_status[ID] in [0, 7, 8, 9, 10]:  # gray
-        flag_status[ID] = 15
-    elif flag_status[ID] in [1]:
-        flag_status[ID] = 11
-    elif flag_status[ID] in [3, 4, 5, 6]:
-        flag_status[ID] = 2
+    log("BUTTON: Blau nimmt ein.")
+    if server_flag_status[ID] in [0, 7, 8, 9, 10]:  # gray
+        server_flag_status[ID] = 15
+    elif server_flag_status[ID] in [1]:
+        server_flag_status[ID] = 11
+    elif server_flag_status[ID] in [3, 4, 5, 6]:
+        server_flag_status[ID] = 2
 
-    update_lcd_flag_status(flag_status)
-
-    #TODO: Senden
-    #lora_send(flag_status, tickets,0,[other_IDs[0],other_IDs[1]])
-    #log("timer started")
-    #tim_send.init(period=3000, mode=Timer.PERIODIC, callback=lora_send_repeat)
+    update_lcd_flag_status(server_flag_status)
 
 
 def button_respawn_down(a):
 
     if debounce() == False:
         return
-    log('Button down')
-    if flag_status[ID] in [1, 2]:  # RED or BLUE
+    log('BUTTON: Respawn.')
+    if server_flag_status[ID] in [1, 2]:  # RED or BLUE
 
-        tickets[flag_status[ID]-1] -= RESPAWN_TICKET_COST  # tickets abziehen
-        respawn_timer.append(RESPAWN_TIME)
-
+        displayed_tickets[server_flag_status[ID]-1] -= RESPAWN_TICKET_COST  # tickets abziehen
+        local_respawn_timer.append(RESPAWN_TIME)
 
 ####### Lora #######
-start_tickets = [INITIAL_TICKET_AMOUNT, INITIAL_TICKET_AMOUNT]
-d_tickets = [[0,0], [0,0], [0,0]] # differential amount of tickets, 
-flags_status = [0,0,0] # flags
 
 def setup_lora():
     global lora
 
     log("Starting server...")
     tim_1s_server.init(period=3000, mode=Timer.PERIODIC, callback=routine)
-
 
 async def broadcast(status):
     swriter = uasyncio.StreamWriter(lora, {})
@@ -189,10 +167,8 @@ async def broadcast(status):
     swriter.write(package(s))
     await swriter.drain()  # Asynchonous transmissi
 
-
 def package(s):
     return len(s).to_bytes(1, 'big') + s
-
 
 def routine():
 
@@ -200,13 +176,16 @@ def routine():
     log("Routine ------------------------------------------------")
     # STATUS
     # send game state
-    log("Delta tickets", d_tickets)
+    log("Delta tickets", local_ticket_diff)
+    # calculate delta tickets
     displayed_tickets = [INITIAL_TICKET_AMOUNT, INITIAL_TICKET_AMOUNT]
     for i in range(2):
         for node in range(3):
-            displayed_tickets[i] -= d_tickets[node][i]
+            displayed_tickets[i] -= local_ticket_diff[node][i]
+            
+    
     game = [id, MESSAGE_TYPE.STATUS,
-            [displayed_tickets, flags_status]]  # send displayed_tickets and flags_status
+            [displayed_tickets, server_flag_status]]  # send displayed_tickets and server_flag_status
     uasyncio.run(broadcast(game))
     # wait a bit TODO: wie lang?
     time.sleep(2)
@@ -231,8 +210,8 @@ def routine():
             if res[1] == MESSAGE_TYPE.UPDATE and res[2] == ID:
                 log("Update received:", res[3])
                 update = res[3]
-                d_tickets[res[0]] = update[0]  # local d_tickets
-                flags_status[res[0]] = update[1]  # local flags_status
+                local_ticket_diff[res[0]] = update[0]  # local d_tickets
+                server_flag_status[res[0]] = update[1]  # update local/server flags_status
 
         else:
            log("Discarding...")
@@ -261,7 +240,7 @@ def update_lcd(signal):
 
 
 def lcd_status_ini():
-    global flag_status
+    global server_flag_status
 
     tft.SetFont(3)
     tft.setTextColor(GREEN)
@@ -280,7 +259,7 @@ def lcd_status_ini():
     tft.setTextCursor(145, 210)
     tft.printh("Charlie")
 
-    update_lcd_flag_status(flag_status)
+    update_lcd_flag_status(server_flag_status)
 
 
 def update_lcd_tickets(tickets):
@@ -316,10 +295,10 @@ def update_win_screen(flag_status, tickets):
         tft.setTextCursor(10, 100)
         tft.setTextColor(WHITE)
         tft.printh(texts[cur-1])
-        tim.deinit()
-        tim_flags.deinit()
-        tim_send.deinit()
-        time.sleep(3)
+        log("WINNER:", cur)
+        deinit_timers()
+
+        time.sleep(5)
         restart_game()
         log("Restarting game...")
 
@@ -357,35 +336,35 @@ def update_lcd_flag_status(flag_status):
 # * respawn timer
 # * lcd update
 def update(x):
-    global tickets
+    global displayed_tickets
     #log(tickets)
     #log(respawn_timer)
-    update_lcd_tickets(tickets)
+    update_lcd_tickets(displayed_tickets)
 
-    for i in range(len(respawn_timer)):
-        if i >= len(respawn_timer):
+    for i in range(len(local_respawn_timer)):
+        if i >= len(local_respawn_timer):
             break
-        respawn_timer[i] -= 1
-        if respawn_timer[i] == 0:
-            del respawn_timer[i]
+        local_respawn_timer[i] -= 1
+        if local_respawn_timer[i] == 0:
+            del local_respawn_timer[i]
             i += 1
-    update_lcd_respawn_timers(respawn_timer)
-    update_win_screen(flag_status, tickets)
+    update_lcd_respawn_timers(local_respawn_timer)
+    update_win_screen(server_flag_status, displayed_tickets)
 
 # jede CONVERSION_TIME/4 Sekunden:
 # * flaggenstatus aktualisieren
 # * lcd update
 def flag_status_update(x):
     global counter
-    for i in range(len(flag_status)):
-        if flag_status[i] > 2:
-            flag_status[i] += 1
-            if (flag_status[i]-3) % 4 == 0:
-                if flag_status[i] <= 11:
-                    flag_status[i] = 1  # ROT
+    for i in range(len(server_flag_status)):
+        if server_flag_status[i] > 2:
+            server_flag_status[i] += 1
+            if (server_flag_status[i]-3) % 4 == 0:
+                if server_flag_status[i] <= 11:
+                    server_flag_status[i] = 1  # ROT
                 else:
-                    flag_status[i] = 2  # BLAU
-    update_lcd_flag_status(flag_status)
+                    server_flag_status[i] = 2  # BLAU
+    update_lcd_flag_status(server_flag_status)
 
 # Jede sekunde VOR dem Spielstart
 def pre_game_countdown(x):
@@ -426,19 +405,25 @@ def start_game():
     button_flag_blue.irq(handler=button_flag_down_blue, trigger=Pin.IRQ_RISING)
     log("Game has started.")
 
+def deinit_timers():
+    tim.deinit()
+    tim_flags.deinit()
+    tim_1s_server.deinit()
+
 
 def restart_game():
-    global flag_status, tickets
-    global game
-
-    flag_status = [0, 0, 0]
-    tickets = [INITIAL_TICKET_AMOUNT, INITIAL_TICKET_AMOUNT]
-    d_tickets = [[0,0], [0,0], [0,0]]
-
-    tim_flags.deinit()
-    tim_logic.deinit()
-    tim.deinit()
-    game = False
+    """Restarts the game, resets to Waiting state, deinits timers"""
+    global server_flag_status, displayed_tickets, game, countdown_time, local_ticket_diff, local_respawn_timer
+    
+    # reset everything to standard values
+    server_flag_status = [0, 0, 0]
+    displayed_tickets = [INITIAL_TICKET_AMOUNT, INITIAL_TICKET_AMOUNT]
+    local_ticket_diff = [[0,0], [0,0], [0,0]]
+    local_respawn_timer = []
+    
+    
+    game = GAME_STATE.WAITING
+    countdown_time = COUNTDOWN_GAME_START
 
 def lcd_init():
     global tft
@@ -449,13 +434,13 @@ def lcd_init():
 
     tft.begin()
     tft.setrotation(1)
-    tft.fillscreen(BLACK)
+    tft.fillscreen(BLUE)
 
     log("LCD initialized.")
     
 ### Main ###
 
-def __main__():
+if __name__ == '__main__':
     lcd_init()
 
     log("Starting game...")
